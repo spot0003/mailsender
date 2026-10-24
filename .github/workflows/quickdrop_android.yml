@@ -1,0 +1,143 @@
+name: QuickDrop Android APK download
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [quickdrop-delivery]
+    paths:
+      - '.github/workflows/quickdrop_android.yml'
+      - 'app/**'
+      - 'packages/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: quickdrop-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=2'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned Flutter SDK
+        uses: actions/checkout@v6
+        with:
+          repository: flutter/flutter
+          ref: '3.41.9'
+          path: .toolchains/flutter
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Reserve disk space for three native Android architectures
+        run: |
+          df -h .
+          # These are unused tools on this isolated hosted Android build runner.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          if [ -d "$ANDROID_HOME/ndk" ]; then
+            find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 ! -name '28.2.13676358' -exec sudo rm -rf -- {} +
+          fi
+          df -h .
+
+      - name: Activate pinned Flutter and FVM
+        run: |
+          flutter_root="$GITHUB_WORKSPACE/.toolchains/flutter"
+          echo "$flutter_root/bin" >> "$GITHUB_PATH"
+          "$flutter_root/bin/flutter" --version
+          "$flutter_root/bin/dart" pub global activate fvm 4.3.2
+          echo "${PUB_CACHE:-$HOME/.pub-cache}/bin" >> "$GITHUB_PATH"
+          fvm_cache="$RUNNER_TEMP/quickdrop-fvm"
+          mkdir -p "$fvm_cache/versions"
+          ln -s "$flutter_root" "$fvm_cache/versions/3.41.9"
+          echo "FVM_CACHE_PATH=$fvm_cache" >> "$GITHUB_ENV"
+
+      - name: Select SDKs and install Android native targets
+        run: |
+          fvm use 3.41.9 --skip-pub-get
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          python - "$sdkmanager" <<'PY'
+          import subprocess, sys
+          subprocess.run([sys.argv[1], '--licenses'], input='y\n' * 100, text=True, check=True)
+          PY
+          "$sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+
+      - name: Resolve locked application dependencies
+        working-directory: app
+        run: fvm flutter pub get --enforce-lockfile
+
+      - name: Analyze application
+        working-directory: app
+        run: fvm flutter analyze --no-pub
+
+      # The Android debug signer produces an installable APK without requiring
+      # upstream/private release keys. This is explicitly a development build.
+      - name: Compile installable universal Android APK
+        working-directory: app
+        run: fvm flutter build apk --debug --no-pub --target-platform android-arm,android-arm64,android-x64
+
+      - name: Verify APK integrity, native libraries, and signing
+        run: |
+          mkdir -p dist
+          cp app/build/app/outputs/flutter-apk/app-debug.apk dist/QuickDrop-Android.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose dist/QuickDrop-Android.apk
+          python - <<'PY'
+          import zipfile
+          with zipfile.ZipFile('dist/QuickDrop-Android.apk') as apk:
+              assert apk.testzip() is None, 'Corrupt APK ZIP entry'
+              names = set(apk.namelist())
+              assert {'AndroidManifest.xml', 'classes.dex'} <= names
+              for abi in ('arm64-v8a', 'armeabi-v7a', 'x86_64'):
+                  assert f'lib/{abi}/librust_lib_localsend_app.so' in names, f'Missing Rust library for {abi}'
+              print('APK integrity and all three native architectures verified.')
+          PY
+          (cd dist && sha256sum QuickDrop-Android.apk > QuickDrop-Android.apk.sha256)
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: QuickDrop-Android-APK
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Provide a directly downloadable APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="quickdrop-android-${GITHUB_SHA:0:12}"
+          cat > "$RUNNER_TEMP/android-notes.md" <<'NOTES'
+          Installable QuickDrop Android development build for Android 7.0+.
+          Download **QuickDrop-Android.apk** below on your Android device, open it,
+          and follow Android's installation prompt. This universal APK includes
+          ARM64, ARMv7 and x86_64 native libraries and uses Android's debug signer.
+          It is not a Google Play release and does not use a production signing key.
+          Export important data before replacing test builds with different signing keys.
+          See the repository's README and docs/STATUS.md for feature limitations.
+          NOTES
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false --title 'QuickDrop Android preview — installable APK' --notes-file "$RUNNER_TEMP/android-notes.md"
+          fi
+          gh release upload "$tag" dist/QuickDrop-Android.apk dist/QuickDrop-Android.apk.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+          echo "### [Download the ready Android APK](https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/QuickDrop-Android.apk)" >> "$GITHUB_STEP_SUMMARY"

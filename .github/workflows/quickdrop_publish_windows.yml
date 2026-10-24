@@ -1,0 +1,85 @@
+name: QuickDrop Windows direct download
+
+on:
+  workflow_run:
+    workflows: ['QuickDrop Windows download']
+    types: [completed]
+    branches: [quickdrop-delivery]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Successful QuickDrop Windows download workflow run ID'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'quickdrop-delivery')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id }}
+    steps:
+      - name: Validate the source build
+        id: source
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > "$RUNNER_TEMP/source-run.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'source-run.json').read_text())
+          assert run['conclusion'] == 'success'
+          assert run['head_branch'] == 'quickdrop-delivery'
+          assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY']
+          assert run['path'] == '.github/workflows/quickdrop_windows.yml'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"sha={run['head_sha']}\n")
+          PY
+
+      - name: Download compiled installer from the verified build
+        uses: actions/download-artifact@v7
+        with:
+          name: QuickDrop-Windows-Installer
+          path: installer
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download compiled portable application
+        uses: actions/download-artifact@v7
+        with:
+          name: QuickDrop-Windows-x64
+          path: portable
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish direct Windows downloads
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          test -s installer/QuickDrop-Setup-Windows-x64.exe
+          test -s portable/localsend_app.exe
+          (cd portable && zip -qr ../QuickDrop-Windows-x64.zip .)
+          sha256sum installer/QuickDrop-Setup-Windows-x64.exe QuickDrop-Windows-x64.zip > SHA256SUMS.txt
+          tag="quickdrop-windows-${SOURCE_SHA:0:12}"
+          cat > "$RUNNER_TEMP/windows-notes.md" <<'NOTES'
+          Ready-to-install QuickDrop development build for 64-bit Windows 10/11.
+          Download **QuickDrop-Setup-Windows-x64.exe** below and run the setup wizard.
+          The installer is unsigned; it is not a commercially signed release.
+          Alternatively, extract **QuickDrop-Windows-x64.zip** completely and open
+          **localsend_app.exe**, keeping its DLLs and data folder beside it.
+          See the repository's README and docs/STATUS.md for feature limitations.
+          NOTES
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title 'QuickDrop Windows preview — ready installer' --notes-file "$RUNNER_TEMP/windows-notes.md"
+          fi
+          gh release upload "$tag" installer/QuickDrop-Setup-Windows-x64.exe QuickDrop-Windows-x64.zip SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+          echo "### [Download the Windows setup EXE](https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/QuickDrop-Setup-Windows-x64.exe)" >> "$GITHUB_STEP_SUMMARY"
