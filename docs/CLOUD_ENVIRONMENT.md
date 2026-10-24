@@ -1,6 +1,6 @@
 # Prepared cloud environment
 
-The selected checkout is `/workspace/mailsender`. The implementation was made against the supplied archive in `/workspace/localsend-main`, then copied into the selected checkout with source-file hashes verified and its original Git metadata preserved. Files remain uncommitted and have not been pushed.
+The selected checkout is `/workspace/mailsender`. The implementation was made against the supplied archive in `/workspace/localsend-main`, then copied into the selected checkout with source-file hashes verified and its original Git metadata preserved. The source is now committed and pushed to the `quickdrop-delivery` branch of `spot0003/mailsender` with user authorization. The original cloud setup draft was saved before this GitHub delivery.
 
 The current machine has pinned SDKs, Python backend dependencies and native Linux build prerequisites under `/workspace/toolchains`. Activate them with:
 

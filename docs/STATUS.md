@@ -1,6 +1,6 @@
 # Implementation and validation status
 
-This is a functioning development fork based on the supplied LocalSend ZIP. It is not a fully audited, signed, store-ready production release. No repository push, external deployment, cloud-environment publication or signed mobile release was performed.
+This is a functioning development fork based on the supplied LocalSend ZIP. It is not a fully audited, signed, store-ready production release. The source has been delivered to the `quickdrop-delivery` branch of `spot0003/mailsender` with user authorization. No external deployment, cloud-environment publication or signed mobile release was performed.
 
 ## Recorded validation (Linux cloud machine, 24 October 2026)
 
