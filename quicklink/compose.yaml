@@ -1,0 +1,26 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: quicklink/Dockerfile
+    environment:
+      QUICKLINK_SENDER_TOKEN: ${QUICKLINK_SENDER_TOKEN:?Set a random sender credential of at least 32 characters}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    restart: unless-stopped
+  tls:
+    image: caddy:2.11-alpine
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - tls_data:/data
+      - tls_config:/config
+    depends_on: [relay]
+    restart: unless-stopped
+volumes:
+  tls_data:
+  tls_config:

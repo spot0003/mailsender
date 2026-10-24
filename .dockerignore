@@ -1,0 +1,7 @@
+.git
+.dart_tool
+.fvm
+**/build
+**/__pycache__
+target
+branding

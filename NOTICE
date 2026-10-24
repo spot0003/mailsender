@@ -1,0 +1,13 @@
+QuickDrop
+A modified distribution based on LocalSend (https://github.com/localsend/localsend).
+
+Original LocalSend copyright notices, authorship, contributor lists and licenses
+are retained in the source and in the About screen. LocalSend is licensed under
+the Apache License, Version 2.0; see LICENSE. Bundled packages retain their own
+license files and notices. Flutter includes third-party licenses in its asset
+bundle; use Flutter's license registry to inspect package notices.
+
+QuickDrop branding, UI, QuickPair, QuickVault, Smart History additions and the
+QuickLink relay are changes to the supplied LocalSend source. This distribution
+is not an official LocalSend release and is not signed or endorsed by its authors.
+New project code is distributed under the Apache License, Version 2.0.

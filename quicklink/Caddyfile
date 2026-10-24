@@ -1,0 +1,12 @@
+# Replace share.example.com with the real DNS name BEFORE deploying.
+share.example.com {
+    # Automatic public TLS. Do not enable request-body logging.
+    header Strict-Transport-Security "max-age=31536000"
+    request_body {
+        max_size 11GB
+    }
+    # Limit connections and request rates at the hosting firewall/API gateway.
+    reverse_proxy relay:8080 {
+        flush_interval -1
+    }
+}
