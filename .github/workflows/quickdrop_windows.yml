@@ -1,0 +1,182 @@
+name: QuickDrop Windows download
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [quickdrop-delivery]
+    paths:
+      - '.github/workflows/quickdrop_windows.yml'
+      - 'app/**'
+      - 'packages/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'support/scripts/compile_windows_exe-inno.iss'
+      - 'support/build/windows/**'
+      - 'support/build/msix/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quickdrop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Build Windows 10 and 11 x64 application
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Support long source paths
+        run: git config --system core.longpaths true
+
+      - name: Check out QuickDrop
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Use the same official tagged SDK source that was validated in cloud.
+      - name: Check out pinned Flutter SDK
+        uses: actions/checkout@v6
+        with:
+          repository: flutter/flutter
+          ref: '3.41.9'
+          path: .toolchains/flutter
+          persist-credentials: false
+
+      - name: Activate Flutter and FVM
+        run: |
+          $flutterRoot = Join-Path $env:GITHUB_WORKSPACE '.toolchains\flutter'
+          Add-Content $env:GITHUB_PATH (Join-Path $flutterRoot 'bin')
+          & "$flutterRoot\bin\flutter.bat" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$flutterRoot\bin\dart.bat" pub global activate fvm 4.3.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pubCache = if ($env:PUB_CACHE) { $env:PUB_CACHE } else { Join-Path $env:LOCALAPPDATA 'Pub\Cache' }
+          Add-Content $env:GITHUB_PATH (Join-Path $pubCache 'bin')
+          $fvmCache = Join-Path $env:RUNNER_TEMP 'quickdrop-fvm'
+          Add-Content $env:GITHUB_ENV "FVM_CACHE_PATH=$fvmCache"
+          $versions = Join-Path $fvmCache 'versions'
+          New-Item -ItemType Directory -Force $versions | Out-Null
+          New-Item -ItemType Junction -Path (Join-Path $versions '3.41.9') -Target $flutterRoot | Out-Null
+
+      - name: Select pinned SDKs
+        run: |
+          fvm use 3.41.9 --skip-pub-get
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install 1.97.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add --toolchain 1.97.1 x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          fvm flutter --version
+          rustc --version
+
+      - name: Resolve locked application dependencies
+        working-directory: app
+        run: fvm flutter pub get --enforce-lockfile
+
+      # The existing Windows CMake install includes this helper. Create a real
+      # package for compilation, then exclude it from unsigned downloads.
+      - name: Build helper required by native CMake
+        run: |
+          $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10'
+          $makepri = Get-ChildItem "$sdkRoot\bin\10.*\x64\makepri.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (-not $makepri) { throw 'Windows SDK MakePri is missing' }
+          & $makepri.FullName new /pr support\build\msix\content /cf support\build\msix\priconfig.xml /mn support\build\msix\content\AppxManifest.xml /of support\build\msix\content\resources.pri /o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $makeappx = "$sdkRoot\App Certification Kit\makeappx.exe"
+          if (-not (Test-Path $makeappx)) { throw 'Windows SDK MakeAppx is missing' }
+          & $makeappx pack /o /d support\build\msix\content /nv /p app\windows\localsend_msix_helper.msix
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Analyze application
+        working-directory: app
+        run: fvm flutter analyze --no-pub
+
+      - name: Compile Windows release application
+        working-directory: app
+        run: fvm flutter build windows --release --no-pub
+
+      - name: Prepare complete portable application
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'app\build\windows\x64\runner\Release'
+          foreach ($required in @('localsend_app.exe', 'flutter_windows.dll', 'rust_lib_localsend_app.dll', 'data\app.so', 'data\icudtl.dat')) {
+            if (-not (Test-Path (Join-Path $bundle $required))) { throw "Missing compiled output: $required" }
+          }
+          $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+          $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $crt = Get-ChildItem "$visualStudio\VC\Redist\MSVC" -Recurse -Directory | Where-Object { $_.FullName -match '\\x64\\Microsoft\.VC143\.CRT$' } | Sort-Object FullName | Select-Object -Last 1
+          if (-not $crt) { throw 'MSVC x64 redistributable runtime was not found' }
+          foreach ($dll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+            $source = Join-Path $crt.FullName $dll
+            if (-not (Test-Path $source)) { throw "Missing runtime: $dll" }
+            if ((Get-AuthenticodeSignature $source).Status -ne 'Valid') { throw "Runtime signature is invalid: $dll" }
+            Copy-Item $source $bundle
+          }
+          foreach ($helper in @('localsend_msix_helper.msix', 'install_msix_helper.ps1', 'localsend_app.exe.manifest')) {
+            Remove-Item (Join-Path $bundle $helper) -ErrorAction SilentlyContinue
+          }
+          Copy-Item LICENSE, NOTICE $bundle
+          @'
+          QuickDrop for Windows 10/11 (64-bit)
+
+          1. Extract ALL files from this ZIP into a folder you can write to.
+          2. Double-click localsend_app.exe to open QuickDrop.
+          3. Keep the data folder and all DLL files beside the executable.
+          4. When Windows asks about network access, allow your trusted private network for local transfers.
+
+          This is an unsigned development build. The app is based on LocalSend;
+          original licenses and notices are retained. QuickLink requires your
+          separately deployed HTTPS relay; it is not automatically configured.
+          '@ | Set-Content -Encoding utf8 (Join-Path $bundle 'START-HERE.txt')
+
+      - name: Upload Windows portable ZIP
+        uses: actions/upload-artifact@v6
+        with:
+          name: QuickDrop-Windows-x64
+          path: app/build/windows/x64/runner/Release/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build Windows setup installer
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP 'quickdrop-installer-payload'
+          $result = Join-Path $env:RUNNER_TEMP 'quickdrop-installer-result'
+          New-Item -ItemType Directory -Force $payload, $result | Out-Null
+          Copy-Item app\build\windows\x64\runner\Release\* $payload -Recurse
+          Copy-Item app\assets\packaging\logo.ico $payload
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          $compiler = if ($iscc) { $iscc.Source } else { 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' }
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup compiler was not found; the portable ZIP is still available above' }
+          & $compiler /DSkipSignTool /DSkipMsixHelper "/DPayloadDir=$payload" "/DResultDir=$result" support\scripts\compile_windows_exe-inno.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Move-Item "$result\quickdrop.exe" "$result\QuickDrop-Setup-Windows-x64.exe"
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: QuickDrop-Windows-Installer
+          path: ${{ runner.temp }}/quickdrop-installer-result/QuickDrop-Setup-Windows-x64.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Explain downloads
+        if: always()
+        run: |
+          @'
+          ## QuickDrop Windows downloads
+          Download artifacts at the bottom of this run page after their upload steps succeed.
+          - **QuickDrop-Windows-x64**: extract the whole ZIP, then run `localsend_app.exe`.
+          - **QuickDrop-Windows-Installer**: extract the ZIP, then run `QuickDrop-Setup-Windows-x64.exe`.
+          These development binaries are unsigned. A green run verifies compilation/packaging; manual testing on your Windows PC is still required.
+          '@ | Add-Content $env:GITHUB_STEP_SUMMARY
