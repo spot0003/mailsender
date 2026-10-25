@@ -1,0 +1,69 @@
+name: QuickDrop Android build diagnostics
+
+on:
+  workflow_run:
+    workflows: ['QuickDrop Android APK download']
+    types: [completed]
+    branches: [quickdrop-delivery]
+  push:
+    branches: [quickdrop-delivery]
+    paths: ['.github/workflows/quickdrop_android_diagnostics.yml']
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  report:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: quickdrop-delivery
+
+      - name: Retrieve failed compiler diagnostics
+        run: |
+          if [ -z "$SOURCE_RUN" ]; then
+            SOURCE_RUN=$(gh run list --workflow quickdrop_android.yml --branch quickdrop-delivery --status failure --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$GITHUB_REPOSITORY")
+          fi
+          test -n "$SOURCE_RUN"
+          echo "$SOURCE_RUN" > "$RUNNER_TEMP/source-run.txt"
+          gh run view "$SOURCE_RUN" --log-failed --repo "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/android-log.txt"
+          python - <<'PY'
+          import os,re
+          from pathlib import Path
+          temp=Path(os.environ['RUNNER_TEMP'])
+          text=(temp/'android-log.txt').read_text(errors='replace')
+          text=re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+          lines=text.splitlines()
+          needles=('FAILURE:', 'What went wrong', 'Exception', 'error:', 'Error:', 'ERROR:', 'Caused by:', 'failed', 'Could not', 'not found', 'requires', 'A problem occurred', 'Build file')
+          selected=set()
+          for index,line in enumerate(lines):
+              if any(needle in line for needle in needles):
+                  selected.update(range(max(0,index-3),min(len(lines),index+10)))
+          if not selected:selected=set(range(max(0,len(lines)-100),len(lines)))
+          excerpt='\n'.join(lines[i] for i in sorted(selected))[-40000:]
+          excerpt=re.sub(r'(?i)(bearer\s+)\S+',r'\1[redacted]',excerpt)
+          excerpt=re.sub(r'https://[^/\s:@]+:[^/\s@]+@','https://[redacted]@',excerpt)
+          report=Path('docs/BUILD_REPORTS/android-latest.md')
+          report.parent.mkdir(parents=True,exist_ok=True)
+          report.write_text('# Android compiler diagnostics\n\nRun: '+(temp/'source-run.txt').read_text().strip()+'\n\n```text\n'+excerpt+'\n```\n')
+          PY
+
+      - name: Save the sanitized build report
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/BUILD_REPORTS/android-latest.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Record Android compiler diagnostics'
+          git push origin HEAD:quickdrop-delivery
